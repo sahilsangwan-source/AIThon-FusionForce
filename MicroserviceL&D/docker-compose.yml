@@ -1,0 +1,435 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: lms-postgres
+    environment:
+      POSTGRES_USER: lmsuser
+      POSTGRES_PASSWORD: lmspassword
+      POSTGRES_DB: lms_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - lms-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lmsuser"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: lms-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass redispassword
+    volumes:
+      - redis_data:/data
+    networks:
+      - lms-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Zookeeper for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: lms-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - lms-network
+
+  # Kafka Message Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: lms-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - lms-network
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # MinIO Object Storage (S3 compatible)
+  minio:
+    image: minio/minio:latest
+    container_name: lms-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - lms-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Eureka Service Discovery
+  eureka-server:
+    build:
+      context: ./eureka-server
+      dockerfile: Dockerfile
+    container_name: lms-eureka
+    ports:
+      - "8761:8761"
+    networks:
+      - lms-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8761/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # API Gateway - ONLY PUBLIC ENDPOINT
+  # ============================================
+  # This is the only microservice exposed to external clients
+  # All requests to other services MUST go through this gateway
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: lms-api-gateway
+    # Only expose API Gateway to external clients
+    ports:
+      - "8080:8080"
+    environment:
+      EUREKA_SERVER_URL: http://eureka-server:8761/eureka/
+      JWT_SECRET: $${JWT_SECRET:404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970}
+      HOSTNAME: api-gateway
+    depends_on:
+      eureka-server:
+        condition: service_healthy
+    networks:
+      - lms-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # User Service - INTERNAL ONLY
+  # ============================================
+  # NO ports exposed to host - only accessible via Docker network from API Gateway
+  # All requests must come from API Gateway with X-Gateway-Authenticated header
+  user-service:
+    build:
+      context: ./user-service
+      dockerfile: Dockerfile
+    container_name: lms-user-service
+    # Port exposed only internally - NO external access
+    expose:
+      - "8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/lms_db
+      SPRING_DATASOURCE_USERNAME: lmsuser
+      SPRING_DATASOURCE_PASSWORD: lmspassword
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_REDIS_PASSWORD: redispassword
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      JWT_SECRET: $${JWT_SECRET:404E635266556A586E3272357538782F413F4428472B4B625064536756B5970}
+      GATEWAY_REQUIRE_GATEWAY_AUTH: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+    networks:
+      - lms-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8081/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Training Service - INTERNAL ONLY
+  # ============================================
+  # NO ports exposed to host - only accessible via Docker network from API Gateway
+  # All requests must come from API Gateway with X-Gateway-Authenticated header
+  training-service:
+    build:
+      context: ./training-service
+      dockerfile: Dockerfile
+    container_name: lms-training-service
+    # Port exposed only internally - NO external access
+    expose:
+      - "8082"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/lms_db
+      SPRING_DATASOURCE_USERNAME: lmsuser
+      SPRING_DATASOURCE_PASSWORD: lmspassword
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      SPRING_REDIS_PASSWORD: redispassword
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      JWT_SECRET: $${JWT_SECRET:404E635266556A586E3272357538782F413F4428472B4B625064536756B5970}
+      GATEWAY_REQUIRE_GATEWAY_AUTH: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      eureka-server:
+        condition: service_healthy
+    networks:
+      - lms-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8082/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+#    networks:
+#      - lms-network
+
+  # Assignment Service
+#  assignment-service:
+#    build:
+#      context: ./assignment-service
+#      dockerfile: Dockerfile
+#    container_name: lms-assignment-service
+#    ports:
+#      - "8083:8083"
+#    environment:
+#      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/lms_db
+#      SPRING_DATASOURCE_USERNAME: lmsuser
+#      SPRING_DATASOURCE_PASSWORD: lmspassword
+#      SPRING_REDIS_HOST: redis
+#      SPRING_REDIS_PORT: 6379
+#      SPRING_REDIS_PASSWORD: redispassword
+#      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+#      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+#    depends_on:
+#      postgres:
+#        condition: service_healthy
+#      redis:
+#        condition: service_healthy
+#      kafka:
+#        condition: service_healthy
+#      eureka-server:
+#        condition: service_healthy
+#    networks:
+#      - lms-network
+
+  # Progress Service
+#  progress-service:
+#    build:
+#      context: ./progress-service
+#      dockerfile: Dockerfile
+#    container_name: lms-progress-service
+#    ports:
+#      - "8084:8084"
+#    environment:
+#      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/lms_db
+#      SPRING_DATASOURCE_USERNAME: lmsuser
+#      SPRING_DATASOURCE_PASSWORD: lmspassword
+#      SPRING_REDIS_HOST: redis
+#      SPRING_REDIS_PORT: 6379
+#      SPRING_REDIS_PASSWORD: redispassword
+#      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+#      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+#    depends_on:
+#      postgres:
+#        condition: service_healthy
+#      redis:
+#        condition: service_healthy
+#      kafka:
+#        condition: service_healthy
+#      eureka-server:
+#        condition: service_healthy
+#    networks:
+#      - lms-network
+
+  # Notification Service
+#  notification-service:
+#    build:
+#      context: ./notification-service
+#      dockerfile: Dockerfile
+#    container_name: lms-notification-service
+#    ports:
+#      - "8085:8085"
+#    environment:
+#      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/lms_db
+#      SPRING_DATASOURCE_USERNAME: lmsuser
+#      SPRING_DATASOURCE_PASSWORD: lmspassword
+#      SPRING_REDIS_HOST: redis
+#      SPRING_REDIS_PORT: 6379
+#      SPRING_REDIS_PASSWORD: redispassword
+#      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+#      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+#    depends_on:
+#      postgres:
+#        condition: service_healthy
+#      redis:
+#        condition: service_healthy
+#      kafka:
+#        condition: service_healthy
+#      eureka-server:
+#        condition: service_healthy
+#    networks:
+#      - lms-network
+
+  # Content Service
+#  content-service:
+#    build:
+#      context: ./content-service
+#      dockerfile: Dockerfile
+#    container_name: lms-content-service
+#    ports:
+#      - "8086:8086"
+#    environment:
+#      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/lms_db
+#      SPRING_DATASOURCE_USERNAME: lmsuser
+#      SPRING_DATASOURCE_PASSWORD: lmspassword
+#      SPRING_REDIS_HOST: redis
+#      SPRING_REDIS_PORT: 6379
+#      SPRING_REDIS_PASSWORD: redispassword
+#      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+#      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+#      MINIO_ENDPOINT: http://minio:9000
+#      MINIO_ACCESS_KEY: minioadmin
+#      MINIO_SECRET_KEY: minioadmin123
+#    depends_on:
+#      postgres:
+#        condition: service_healthy
+#      redis:
+#        condition: service_healthy
+#      kafka:
+#        condition: service_healthy
+#      minio:
+#        condition: service_healthy
+#      eureka-server:
+#        condition: service_healthy
+#    networks:
+#      - lms-network
+
+  # Workflow Service
+#  workflow-service:
+#    build:
+#      context: ./workflow-service
+#      dockerfile: Dockerfile
+#    container_name: lms-workflow-service
+#    ports:
+#      - "8088:8088"
+#    environment:
+#      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/lms_db
+#      SPRING_DATASOURCE_USERNAME: lmsuser
+#      SPRING_DATASOURCE_PASSWORD: lmspassword
+#      SPRING_REDIS_HOST: redis
+#      SPRING_REDIS_PORT: 6379
+#      SPRING_REDIS_PASSWORD: redispassword
+#      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+#      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+#    depends_on:
+#      postgres:
+#        condition: service_healthy
+#      redis:
+#        condition: service_healthy
+#      kafka:
+#        condition: service_healthy
+#      eureka-server:
+#        condition: service_healthy
+#    networks:
+#      - lms-network
+
+  # Analytics Service (Python)
+#  analytics-service:
+#    build:
+#      context: ./analytics-service
+#      dockerfile: Dockerfile
+#    container_name: lms-analytics-service
+#    ports:
+#      - "8087:8087"
+#    environment:
+#      DATABASE_URL: postgresql://lmsuser:lmspassword@postgres:5432/lms_db
+#      REDIS_HOST: redis
+#      REDIS_PORT: 6379
+#      REDIS_PASSWORD: redispassword
+#      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+#      MINIO_ENDPOINT: minio:9000
+#      MINIO_ACCESS_KEY: minioadmin
+#      MINIO_SECRET_KEY: minioadmin123
+#    depends_on:
+#      postgres:
+#        condition: service_healthy
+#      redis:
+#        condition: service_healthy
+#      kafka:
+#        condition: service_healthy
+#      minio:
+#        condition: service_healthy
+#    networks:
+#      - lms-network
+
+  # API Gateway
+#  api-gateway:
+#    build:
+#      context: ./api-gateway
+#      dockerfile: Dockerfile
+#    container_name: lms-api-gateway
+#    ports:
+#      - "8080:8080"
+#    environment:
+#      SPRING_REDIS_HOST: redis
+#      SPRING_REDIS_PORT: 6379
+#      SPRING_REDIS_PASSWORD: redispassword
+#      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+#    depends_on:
+#      redis:
+#        condition: service_healthy
+#      eureka-server:
+#        condition: service_healthy
+#    networks:
+#      - lms-network
+
+networks:
+  lms-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

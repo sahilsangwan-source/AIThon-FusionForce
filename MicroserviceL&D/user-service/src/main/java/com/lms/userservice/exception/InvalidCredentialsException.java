@@ -1,0 +1,15 @@
+package com.lms.userservice.exception;
+
+/**
+ * Exception thrown when credentials are invalid
+ */
+public class InvalidCredentialsException extends RuntimeException {
+
+    public InvalidCredentialsException(String message) {
+        super(message);
+    }
+
+    public InvalidCredentialsException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}

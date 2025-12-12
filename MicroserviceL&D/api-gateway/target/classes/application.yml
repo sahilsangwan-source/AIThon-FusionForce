@@ -1,0 +1,158 @@
+server:
+  port: 8080
+  # Bind to all interfaces - restrict access via network policies
+  address: 0.0.0.0
+
+spring:
+  application:
+    name: api-gateway
+
+  # Redis configuration for rate limiting
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:redispassword}
+
+  cloud:
+    gateway:
+      # Global CORS configuration
+      globalcors:
+        cors-configurations:
+          "[/**]":
+            allowedOrigins: "*"
+            allowedMethods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+              - OPTIONS
+              - PATCH
+            allowedHeaders: "*"
+            allowCredentials: false
+
+      # Route configurations
+      routes:
+        # ==================== USER SERVICE ROUTES ====================
+        # All requests to /api/auth/* are routed to USER-SERVICE
+        # The /api prefix is stripped, so /api/auth/login becomes /auth/login
+
+        # Authentication endpoints (public - no JWT required)
+        - id: user-auth-register
+          uri: lb://USER-SERVICE
+          predicates:
+            - Path=/api/auth/register
+            - Method=POST
+
+        - id: user-auth-login
+          uri: lb://USER-SERVICE
+          predicates:
+            - Path=/api/auth/login
+            - Method=POST
+
+        - id: user-auth-refresh
+          uri: lb://USER-SERVICE
+          predicates:
+            - Path=/api/auth/refresh
+            - Method=POST
+
+        # Protected user endpoints (require JWT)
+        - id: user-service-protected
+          uri: lb://USER-SERVICE
+          predicates:
+            - Path=/api/users/**
+          filters:
+            - JwtAuthenticationFilter
+
+        # ==================== TRAINING SERVICE ROUTES ====================
+
+        # Public training endpoints (no JWT required)
+        - id: training-public
+          uri: lb://TRAINING-SERVICE
+          predicates:
+            - Path=/api/trainings/public/**
+
+        - id: training-search
+          uri: lb://TRAINING-SERVICE
+          predicates:
+            - Path=/api/trainings/search
+            - Method=GET
+
+        - id: training-published
+          uri: lb://TRAINING-SERVICE
+          predicates:
+            - Path=/api/trainings/published
+            - Method=GET
+
+        # Protected training endpoints (require JWT)
+        - id: training-service-protected
+          uri: lb://TRAINING-SERVICE
+          predicates:
+            - Path=/api/trainings/**
+          filters:
+            - JwtAuthenticationFilter
+
+        - id: training-modules-protected
+          uri: lb://TRAINING-SERVICE
+          predicates:
+            - Path=/api/modules/**
+          filters:
+            - JwtAuthenticationFilter
+
+        - id: training-content-protected
+          uri: lb://TRAINING-SERVICE
+          predicates:
+            - Path=/api/content/**
+          filters:
+            - JwtAuthenticationFilter
+
+        - id: training-quizzes-protected
+          uri: lb://TRAINING-SERVICE
+          predicates:
+            - Path=/api/quizzes/**
+          filters:
+            - JwtAuthenticationFilter
+
+        - id: training-enrollments-protected
+          uri: lb://TRAINING-SERVICE
+          predicates:
+            - Path=/api/enrollments/**
+          filters:
+            - JwtAuthenticationFilter
+
+      # Discovery locator (enables dynamic routing)
+      discovery:
+        locator:
+          enabled: true
+          lower-case-service-id: true
+
+# ===================== EUREKA CLIENT CONFIGURATION =====================
+# API Gateway registers with Eureka and discovers other services
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_SERVER_URL:http://eureka-server:8761/eureka/}
+    fetch-registry: true
+    register-with-eureka: true
+    registry-fetch-interval-seconds: 10
+  instance:
+    prefer-ip-address: false
+    hostname: api-gateway
+    instance-id: ${spring.application.name}:${server.port}
+    lease-renewal-interval-in-seconds: 10
+    lease-expiration-duration-in-seconds: 30
+
+# ===================== JWT CONFIGURATION =====================
+jwt:
+  secret: ${JWT_SECRET:404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970}
+  expiration: ${JWT_EXPIRATION:3600000}
+
+# ===================== MANAGEMENT & MONITORING =====================
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always

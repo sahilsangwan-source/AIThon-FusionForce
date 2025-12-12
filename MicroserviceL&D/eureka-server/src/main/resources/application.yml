@@ -1,0 +1,120 @@
+server:
+  port: 8761
+  servlet:
+    context-path: /
+
+spring:
+  application:
+    name: eureka-server
+
+  # ===================== OUTPUT FORMATTING =====================
+  output:
+    ansi:
+      enabled: always
+
+# ===================== EUREKA SERVER CONFIGURATION =====================
+# This is the Service Discovery Server for all microservices
+# All other services will register themselves here
+eureka:
+  # Instance configuration
+  instance:
+    # Hostname for this Eureka server instance
+    hostname: ${EUREKA_INSTANCE_HOSTNAME:localhost}
+    # Prefer IP address over hostname
+    prefer-ip-address: false
+    # Lease renewal interval (how often to send heartbeat)
+    lease-renewal-interval-in-seconds: 10
+    # Lease expiration time (how long before removing inactive instance)
+    lease-expiration-duration-in-seconds: 30
+
+  # Client configuration
+  client:
+    # Don't register this server as a client to itself
+    register-with-eureka: false
+    # Don't fetch registry updates
+    fetch-registry: false
+    # Service URL where other services can find Eureka
+    service-url:
+      defaultZone: http://${eureka.instance.hostname}:${server.port}/eureka/
+    # Health check configuration
+    healthcheck:
+      enabled: true
+
+  # Server configuration
+  server:
+    # ===================== IMPORTANT SETTINGS =====================
+    # enable-self-preservation: Set to 'false' for development/testing
+    # In production, set to 'true' to prevent network partitions from removing services
+    enable-self-preservation: ${EUREKA_SERVER_ENABLE_SELF_PRESERVATION:false}
+
+    # Interval (in milliseconds) for evicting services without active heartbeats
+    # Lower values = faster detection of dead services (good for development)
+    # Higher values = more resilient to network issues (better for production)
+    eviction-interval-timer-in-ms: ${EUREKA_SERVER_EVICTION_INTERVAL:5000}
+
+    # Expected heartbeat rate from clients
+    # Used to estimate if a client is healthy
+    expected-client-renewal-interval-seconds: 30
+
+    # Minimum percentage of heartbeats to maintain
+    # If below this, self-preservation mode activates
+    renewal-percent-threshold: ${EUREKA_SERVER_RENEWAL_PERCENT_THRESHOLD:0.85}
+
+    # Enable request rate limiting (for production)
+    enable-request-rate-limit: false
+
+    # Dashboard refresh interval (in milliseconds)
+    dashboard-refresh-interval-ms: 3000
+
+# ===================== MANAGEMENT & MONITORING =====================
+management:
+  endpoints:
+    web:
+      exposure:
+        # Expose health and info endpoints for Docker health checks
+        include: health,info,metrics
+      # Base path for management endpoints
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
+  metrics:
+    export:
+      simple:
+        enabled: true
+
+# ===================== LOGGING CONFIGURATION =====================
+logging:
+  level:
+    # Eureka logging
+    com.netflix.eureka: INFO
+    com.netflix.discovery: INFO
+    org.springframework.cloud.netflix.eureka.server: INFO
+    # Spring Cloud logging
+    org.springframework.cloud: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+# ===================== DEVELOPMENT vs PRODUCTION =====================
+# Development (Current Settings):
+#   enable-self-preservation: false
+#   eviction-interval-timer-in-ms: 5000
+#   → Fast detection of dead services
+#   → Quick removal of unhealthy instances
+#
+# Production (Recommended Settings):
+#   enable-self-preservation: true
+#   eviction-interval-timer-in-ms: 60000
+#   → Resilient to temporary network issues
+#   → Prevents cascading service failures
+#
+# To switch to production, change environment variables:
+#   EUREKA_SERVER_ENABLE_SELF_PRESERVATION=true
+#   EUREKA_SERVER_EVICTION_INTERVAL=60000

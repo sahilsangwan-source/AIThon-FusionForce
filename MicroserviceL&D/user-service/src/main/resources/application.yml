@@ -1,0 +1,168 @@
+server:
+  port: 8081
+  servlet:
+    context-path: /
+
+spring:
+  application:
+    name: user-service
+
+  # ===================== DATABASE CONFIGURATION =====================
+  # Update these credentials in production
+  # For docker-compose: postgres container provides these defaults
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/lms_db}
+    # Change this username in production - stored in docker-compose.yml
+    username: ${SPRING_DATASOURCE_USERNAME:lmsuser}
+    # Change this password in production - IMPORTANT for production security
+    password: ${SPRING_DATASOURCE_PASSWORD:lmspassword}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate # Change to 'validate' in production
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+  # ===================== REDIS CACHE CONFIGURATION =====================
+  # Update these credentials in production
+  data:
+    redis:
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: ${SPRING_REDIS_PORT:6379}
+      # Change this password in production - stored in docker-compose.yml
+      password: ${SPRING_REDIS_PASSWORD:redispassword}
+      timeout: 60000
+      lettuce:
+        pool:
+          max-active: 20
+          max-idle: 10
+          min-idle: 5
+
+  # ===================== KAFKA MESSAGE BROKER CONFIGURATION =====================
+  # These settings connect to the Kafka broker in docker-compose
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:29092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 3
+    consumer:
+      group-id: user-service-group
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "*"
+      auto-offset-reset: earliest
+
+# ===================== EUREKA SERVICE DISCOVERY =====================
+eureka:
+  client:
+    service-url:
+      # Change this in production to your Eureka server URL
+      defaultZone: ${EUREKA_CLIENT_SERVICEURL_DEFAULTZONE:http://eureka-server:8761/eureka/}
+    register-with-eureka: true
+    fetch-registry: true
+    registry-fetch-interval-seconds: 10
+  instance:
+    prefer-ip-address: false
+    hostname: user-service
+    instance-id: ${spring.application.name}:${server.port}
+    lease-renewal-interval-in-seconds: 10
+    lease-expiration-duration-in-seconds: 30
+
+# ===================== GATEWAY ACCESS VALIDATION =====================
+# All requests should come through API Gateway
+# Services validate X-Gateway-Authenticated header to ensure requests are from gateway
+gateway:
+  # Require all requests to have gateway authentication header
+  require-gateway-auth: true
+  # Allowed gateway hosts (restrict direct access attempts)
+  allowed-hosts:
+    - api-gateway
+    - localhost
+
+# ===================== JWT SECURITY CONFIGURATION =====================
+# IMPORTANT: Change these values in production environment
+# Use environment variables to pass these in docker-compose
+jwt:
+  # Secret key for JWT signing - MUST match API Gateway secret
+  # Generate a secure 256-bit key: openssl rand -hex 32
+  secret: ${JWT_SECRET:404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970}
+  # Token expiration: 1 hour (3600000 milliseconds)
+  expiration: ${JWT_EXPIRATION:3600000}
+  # Refresh token expiration: 7 days (604800000 milliseconds)
+  refresh-expiration: ${JWT_REFRESH_EXPIRATION:604800000}
+
+# ===================== MANAGEMENT & MONITORING =====================
+# Health checks and metrics for Docker Compose and monitoring
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+# ===================== RESILIENCE4J CONFIGURATION =====================
+resilience4j:
+  circuitbreaker:
+    instances:
+      trainingService:
+        registerHealthIndicator: true
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 5
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+        waitDurationInOpenState: 10s
+        failureRateThreshold: 50
+        eventConsumerBufferSize: 10
+  retry:
+    instances:
+      trainingService:
+        maxAttempts: 3
+        waitDuration: 1s
+        enableExponentialBackoff: true
+        exponentialBackoffMultiplier: 2
+  ratelimiter:
+    instances:
+      trainingService:
+        limitForPeriod: 50
+        limitRefreshPeriod: 1s
+        timeoutDuration: 0s
+
+# ===================== FEIGN CONFIGURATION =====================
+feign:
+  client:
+    config:
+      default:
+        connectTimeout: 5000
+        readTimeout: 5000
+        loggerLevel: basic
+  circuitbreaker:
+    enabled: true
+
+# ===================== LOGGING CONFIGURATION =====================
+logging:
+  level:
+    com.lms.userservice: DEBUG
+    org.springframework.security: INFO
+    org.springframework.kafka: INFO
+    org.springframework.web: INFO
+    org.springframework.cloud.openfeign: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
